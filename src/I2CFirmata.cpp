@@ -261,8 +261,9 @@ void I2CFirmata::disableI2CPins()
   isI2CEnabled = false;
   // disable read continuous mode for all devices
   queryIndex = -1;
-  // uncomment the following if or when the end() method is added to Wire library
-  // Wire.end();
+#ifndef ESP8266
+  Wire.end();
+#endif
 }
 
 void I2CFirmata::reset()
