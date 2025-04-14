@@ -9,6 +9,7 @@
 #include "I2CFirmata.h"
 
 I2CFirmata::I2CFirmata()
+	: query()
 {
     isI2CEnabled = false;
     queryIndex = -1;
@@ -245,7 +246,7 @@ boolean I2CFirmata::enableI2CPins()
 #ifndef ESP8266
   Wire.end();
 #endif
-#ifdef ARDUINO_M5STACK_Core2
+#if defined(ARDUINO_M5STACK_Core2) || defined (ARDUINO_M5STACK_TOUGH)
     // For the M5Stack, we explicitly choose the pins, because we want to use the internal I2C bus by default
     // It has the on-board devices attached: touchscreen, RTC, power controller and IMU (Core2 only)
   Wire.begin(21, 22);
@@ -276,6 +277,10 @@ void I2CFirmata::reset()
 void I2CFirmata::report(bool elapsed)
 {
   // report i2c data for all device with read continuous mode enabled
+  if (!elapsed)
+  {
+    return;
+  }
   if (queryIndex > -1) {
     for (byte i = 0; i < queryIndex + 1; i++) {
       readAndReportData(query[i].addr, query[i].reg, query[i].bytes, query[i].stopTX, 0);
