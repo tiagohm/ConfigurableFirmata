@@ -269,6 +269,7 @@ void I2CFirmata::disableI2CPins()
 
 void I2CFirmata::reset()
 {
+  i2cReadDelayTime = 0;
   if (isI2CEnabled) {
     disableI2CPins();
   }

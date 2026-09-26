@@ -402,6 +402,13 @@ void SpiFirmata::reset()
   if (isSpiEnabled) {
     disableSpiPins();
   }
+
+  for (int i = 0; i < SPI_MAX_DEVICES; i++) {
+    config[i].deviceIdChannel = -1;
+    config[i].csPin = -1;
+    config[i].used = false;
+    config[i].packedData = false;
+  }
 }
 
 void SpiFirmata::report(bool elapsed)
