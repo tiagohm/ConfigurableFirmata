@@ -175,7 +175,8 @@ boolean AccelStepperFirmata::handleSysex(byte command, byte argc, byte *argv)
       // Also initializes AccelStepper's enable inversion when the optional byte is absent.
       const byte invertPins = argc == requiredArgc + 1 ? argv[requiredArgc] : 0;
       if (wireCount == 1) {
-        stepper[id]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 4 & 0x01);
+        // The DRIVER overload takes direction before step; Firmata numbers step first.
+        stepper[id]->setPinsInverted((invertPins >> 1) & 0x01, invertPins & 0x01, (invertPins >> 4) & 0x01);
       } else {
         stepper[id]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 2 & 0x01, invertPins >> 3 & 0x01, invertPins >> 4 & 0x01);
       }
