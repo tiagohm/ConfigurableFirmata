@@ -150,7 +150,7 @@ boolean AccelStepperFirmata::handleSysex(byte command, byte argc, byte *argv)
         }
 
         // If there is still another byte to read we must be inverting some pins
-        if (argc >= index) {
+        if (argc > index) {
           invertPins = argv[index];
           if (wireCount == 1) {
             stepper[deviceNum]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 4 & 0x01);
@@ -310,6 +310,7 @@ boolean AccelStepperFirmata::handleSysex(byte command, byte argc, byte *argv)
 void AccelStepperFirmata::reset()
 {
   for (byte i = 0; i < MAX_ACCELSTEPPERS; i++) {
+    isRunning[i] = false;
     if (stepper[i]) {
       free(stepper[i]);
       stepper[i] = 0;
@@ -318,6 +319,8 @@ void AccelStepperFirmata::reset()
   numSteppers = 0;
 
   for (byte i = 0; i < MAX_GROUPS; i++) {
+    groupStepperCount[i] = 0;
+    groupIsRunning[i] = false;
     if (group[i]) {
       free(group[i]);
       group[i] = 0;
