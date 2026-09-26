@@ -42,7 +42,7 @@ void AccelStepperFirmata::handleCapability(byte pin)
 // Send position data when it's requested or a move completes
 void AccelStepperFirmata::reportPosition(byte deviceNum, bool complete)
 {
-  if (stepper[deviceNum]) {
+  if (deviceNum < MAX_ACCELSTEPPERS && stepper[deviceNum]) {
     byte data[5];
     long position = stepper[deviceNum]->currentPosition();
     encode32BitSignedInteger(position, data);
@@ -66,7 +66,7 @@ void AccelStepperFirmata::reportPosition(byte deviceNum, bool complete)
 
 void AccelStepperFirmata::reportGroupComplete(byte deviceNum)
 {
-  if (group[deviceNum]) {
+  if (deviceNum < MAX_GROUPS && group[deviceNum]) {
     Firmata.write(START_SYSEX);
     Firmata.write(ACCELSTEPPER_DATA);
     Firmata.write(MULTISTEPPER_MOVE_COMPLETE);
@@ -81,226 +81,266 @@ void AccelStepperFirmata::reportGroupComplete(byte deviceNum)
 
 boolean AccelStepperFirmata::handleSysex(byte command, byte argc, byte *argv)
 {
-  if (command == ACCELSTEPPER_DATA) {
-    byte stepCommand, deviceNum, interface, wireCount, stepType;
-    byte stepOrMotorPin1, directionOrMotorPin2;
-    byte motorPin3 = 0, motorPin4 = 0, enablePin = 0, invertPins = 0;
-    long numSteps;
+  if (command != ACCELSTEPPER_DATA) {
+    return false;
+  }
 
-    unsigned int index = 0;
+  if (argc < 2) {
+    Firmata.sendString(F("ACCELSTEPPER_DATA: message too short"));
+    return false;
+  }
 
-    stepCommand = argv[index++];
-    deviceNum = argv[index++];
+  const byte stepCommand = argv[0];
+  const byte id = argv[1];
 
-    if (deviceNum < MAX_ACCELSTEPPERS) {
+  switch (stepCommand) {
+    case ACCELSTEPPER_CONFIG: {
+      if (id >= MAX_ACCELSTEPPERS || argc < 5) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: invalid message"));
+        return false;
+      }
 
-      if (stepCommand == ACCELSTEPPER_CONFIG) {
-        interface = argv[index++];
-        wireCount = (interface & 0x70) >> 4; // upper 3 bits are the wire count
-        stepType = (interface & 0x0e) >> 1; // next 3 bits are the step type
-        stepOrMotorPin1 = argv[index++]; // Step pin for driver or MotorPin1
-        directionOrMotorPin2 = argv[index++]; // Direction pin for driver or motorPin2
+      const byte interface = argv[2];
+      const byte wireCount = (interface & 0x70) >> 4;
+      const byte stepType = (interface & 0x0e) >> 1;
+      const bool supportedInterface = wireCount == 1 || wireCount == 2 ||
+          ((wireCount == 3 || wireCount == 4) &&
+           (stepType == STEP_TYPE_WHOLE || stepType == STEP_TYPE_HALF));
 
-        if (Firmata.getPinMode(directionOrMotorPin2) == PIN_MODE_IGNORE
-            || Firmata.getPinMode(stepOrMotorPin1) == PIN_MODE_IGNORE) {
+      if (!supportedInterface) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: unsupported interface"));
+        return false;
+      }
+
+      byte requiredArgc = 5;
+      if (wireCount >= 3) requiredArgc++;
+      if (wireCount >= 4) requiredArgc++;
+      if (interface & 0x01) requiredArgc++;
+
+      if (argc != requiredArgc && argc != requiredArgc + 1) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: invalid length"));
+        return false;
+      }
+
+      if (stepper[id]) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: device already configured"));
+        return false;
+      }
+
+      const byte stepOrMotorPin1 = argv[3];
+      const byte directionOrMotorPin2 = argv[4];
+      const byte motorPin3 = wireCount >= 3 ? argv[5] : 0;
+      const byte motorPin4 = wireCount >= 4 ? argv[6] : 0;
+      const byte enablePin = (interface & 0x01) ? argv[requiredArgc - 1] : 0;
+      const byte motorPins[] = {stepOrMotorPin1, directionOrMotorPin2, motorPin3, motorPin4};
+      const byte motorPinCount = wireCount == 1 ? 2 : wireCount;
+
+      // All pin modes must be valid before any pin state changes.
+      for (byte i = 0; i < motorPinCount; i++) {
+        const byte pin = motorPins[i];
+        if (pin >= TOTAL_PINS || Firmata.getPinMode(pin) == PIN_MODE_IGNORE) {
+          Firmata.sendString(F("ACCELSTEPPER_CONFIG: invalid pin"));
           return false;
         }
-
-        Firmata.setPinMode(stepOrMotorPin1, PIN_MODE_STEPPER);
-        Firmata.setPinMode(directionOrMotorPin2, PIN_MODE_STEPPER);
-
-        if (!stepper[deviceNum]) {
-          numSteppers++;
-        }
-
-        if (wireCount >= 3) {
-          motorPin3 = argv[index++];
-          if (Firmata.getPinMode(motorPin3) == PIN_MODE_IGNORE)
-            return false;
-          Firmata.setPinMode(motorPin3, PIN_MODE_STEPPER);
-        }
-
-        if (wireCount >= 4) {
-          motorPin4 = argv[index++];
-          if (Firmata.getPinMode(motorPin4) == PIN_MODE_IGNORE)
-            return false;
-          Firmata.setPinMode(motorPin4, PIN_MODE_STEPPER);
-        }
-
-        // If we have an enable pin
-        if (interface & 0x01) {
-          enablePin = argv[index++];
-          if (Firmata.getPinMode(enablePin) == PIN_MODE_IGNORE)
-            return false;
-        }
-
-        // Instantiate our stepper
-        if (wireCount == 1) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::DRIVER, stepOrMotorPin1, directionOrMotorPin2);
-        } else if (wireCount == 2) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::FULL2WIRE, stepOrMotorPin1, directionOrMotorPin2);
-        } else if (wireCount == 3 && stepType == STEP_TYPE_WHOLE) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::FULL3WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3);
-        } else if (wireCount == 3 && stepType == STEP_TYPE_HALF) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::HALF3WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3);
-        } else if (wireCount == 4 && stepType == STEP_TYPE_WHOLE) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::FULL4WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3, motorPin4, false);
-        } else if (wireCount == 4 && stepType == STEP_TYPE_HALF) {
-          stepper[deviceNum] = new AccelStepper(AccelStepper::HALF4WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3, motorPin4, false);
-        }
-
-        // If there is still another byte to read we must be inverting some pins
-        if (argc > index) {
-          invertPins = argv[index];
-          if (wireCount == 1) {
-            stepper[deviceNum]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 4 & 0x01);
-          } else {
-            stepper[deviceNum]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 2 & 0x01, invertPins >> 3 & 0x01, invertPins >> 4 & 0x01);
-          }
-        }
-
-        if (interface & 0x01) {
-          stepper[deviceNum]->setEnablePin(enablePin);
-        }
-
-        /*
-          Default to no acceleration. We set the acceleration value high enough that our speed is
-          reached on the first step of a movement.
-          More info about this hack in ACCELSTEPPER_SET_ACCELERATION.
-
-          The lines where we are setting the speed twice are necessary because if the max speed doesn't change
-          from the default value then our time to next step does not get computed after raising the acceleration.
-        */
-        stepper[deviceNum]->setMaxSpeed(2.0);
-        stepper[deviceNum]->setMaxSpeed(1.0);
-        stepper[deviceNum]->setAcceleration(MAX_ACCELERATION);
-
-        isRunning[deviceNum] = false;
-
+      }
+      if ((interface & 0x01) &&
+          (enablePin >= TOTAL_PINS || Firmata.getPinMode(enablePin) == PIN_MODE_IGNORE)) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: invalid pin"));
+        return false;
       }
 
-      else if (stepCommand == ACCELSTEPPER_STEP) {
-        numSteps = decode32BitSignedInteger(argv[2], argv[3], argv[4], argv[5], argv[6]);
+      Firmata.setPinMode(stepOrMotorPin1, PIN_MODE_STEPPER);
+      Firmata.setPinMode(directionOrMotorPin2, PIN_MODE_STEPPER);
+      if (wireCount >= 3) Firmata.setPinMode(motorPin3, PIN_MODE_STEPPER);
+      if (wireCount >= 4) Firmata.setPinMode(motorPin4, PIN_MODE_STEPPER);
 
-        if (stepper[deviceNum]) {
-          stepper[deviceNum]->move(numSteps);
-          isRunning[deviceNum] = true;
-        }
-
+      if (wireCount == 1) {
+        stepper[id] = new AccelStepper(AccelStepper::DRIVER, stepOrMotorPin1, directionOrMotorPin2);
+      } else if (wireCount == 2) {
+        stepper[id] = new AccelStepper(AccelStepper::FULL2WIRE, stepOrMotorPin1, directionOrMotorPin2);
+      } else if (wireCount == 3 && stepType == STEP_TYPE_WHOLE) {
+        stepper[id] = new AccelStepper(AccelStepper::FULL3WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3);
+      } else if (wireCount == 3) {
+        stepper[id] = new AccelStepper(AccelStepper::HALF3WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3);
+      } else if (stepType == STEP_TYPE_WHOLE) {
+        stepper[id] = new AccelStepper(AccelStepper::FULL4WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3, motorPin4, false);
+      } else {
+        stepper[id] = new AccelStepper(AccelStepper::HALF4WIRE, stepOrMotorPin1, directionOrMotorPin2, motorPin3, motorPin4, false);
+      }
+      if (!stepper[id]) {
+        Firmata.sendString(F("ACCELSTEPPER_CONFIG: allocation failed"));
+        return false;
       }
 
-      else if (stepCommand == ACCELSTEPPER_ZERO) {
-        if (stepper[deviceNum]) {
-          stepper[deviceNum]->setCurrentPosition(0);
-        }
+      // Also initializes AccelStepper's enable inversion when the optional byte is absent.
+      const byte invertPins = argc == requiredArgc + 1 ? argv[requiredArgc] : 0;
+      if (wireCount == 1) {
+        stepper[id]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 4 & 0x01);
+      } else {
+        stepper[id]->setPinsInverted(invertPins & 0x01, invertPins >> 1 & 0x01, invertPins >> 2 & 0x01, invertPins >> 3 & 0x01, invertPins >> 4 & 0x01);
       }
 
-      else if (stepCommand == ACCELSTEPPER_TO) {
-        if (stepper[deviceNum]) {
-          numSteps = decode32BitSignedInteger(argv[2], argv[3], argv[4], argv[5], argv[6]);
-          stepper[deviceNum]->moveTo(numSteps);
-          isRunning[deviceNum] = true;
-        }
+      if (interface & 0x01) {
+        stepper[id]->setEnablePin(enablePin);
       }
 
-      else if (stepCommand == ACCELSTEPPER_ENABLE) {
-        if (stepper[deviceNum]) {
-          if (argv[2] == 0x00) {
-            stepper[deviceNum]->disableOutputs();
-          } else {
-            stepper[deviceNum]->enableOutputs();
-          }
-        }
-      }
-
-      else if (stepCommand == ACCELSTEPPER_STOP) {
-        if (stepper[deviceNum]) {
-          stepper[deviceNum]->stop();
-          isRunning[deviceNum] = false;
-          reportPosition(deviceNum, true);
-        }
-      }
-
-      else if (stepCommand == ACCELSTEPPER_REPORT_POSITION) {
-        if (stepper[deviceNum]) {
-          reportPosition(deviceNum, false);
-        }
-      }
-
-      else if (stepCommand == ACCELSTEPPER_SET_ACCELERATION) {
-        float decodedAcceleration = decodeCustomFloat(argv[2], argv[3], argv[4], argv[5]);
-
-        if (stepper[deviceNum]) {
-          /*
-            <HACK>
-            All firmata instances of accelStepper have an acceleration value. If a user does not
-            want acceleration we just set the acceleration value high enough so
-            that the chosen speed will be realized by the first step of a movement.
-            This simplifies some of the logic in StepperFirmata and gives us more flexibility
-            should an alternative stepper library become available at a future date.
-          */
-          if (decodedAcceleration == 0.0) {
-            stepper[deviceNum]->setAcceleration(MAX_ACCELERATION);
-          } else {
-            stepper[deviceNum]->setAcceleration(decodedAcceleration);
-          }
-          /*
-            </HACK>
-          */
-        }
-
-      }
-
-      else if (stepCommand == ACCELSTEPPER_SET_SPEED) {
-        // Sets the maxSpeed for accelStepper. We do not use setSpeed here because
-        // all instances of accelStepper that have been created by firmata are
-        // using acceleration. More info about this hack in ACCELSTEPPER_SET_ACCELERATION.
-        float speed = decodeCustomFloat(argv[2], argv[3], argv[4], argv[5]);
-
-        if (stepper[deviceNum]) {
-          stepper[deviceNum]->setMaxSpeed(speed);
-        }
-      }
-
-      else if (stepCommand == MULTISTEPPER_CONFIG) {
-        if (!group[deviceNum]) {
-          numGroups++;
-          group[deviceNum] = new MultiStepper();
-        }
-
-        for (byte i = index; i < argc; i++) {
-          byte stepperNumber = argv[i];
-
-          if (stepper[stepperNumber]) {
-            groupStepperCount[deviceNum]++;
-            group[deviceNum]->addStepper(*stepper[stepperNumber]);
-          }
-        }
-
-        groupIsRunning[deviceNum] = false;
-      }
-
-      else if (stepCommand == MULTISTEPPER_TO) {
-        groupIsRunning[deviceNum] = true;
-        long positions[groupStepperCount[deviceNum]];
-
-        for (byte i = 0, offset = 0; i < groupStepperCount[deviceNum]; i++) {
-          offset = index + (i * 5);
-          positions[i] = decode32BitSignedInteger(argv[offset], argv[offset + 1], argv[offset + 2], argv[offset + 3], argv[offset + 4]);
-        }
-
-        group[deviceNum]->moveTo(positions);
-      }
-
-      else if (stepCommand == MULTISTEPPER_STOP) {
-        groupIsRunning[deviceNum] = false;
-        reportGroupComplete(deviceNum);
-      }
+      // Reach the requested speed on the first step when acceleration is omitted.
+      stepper[id]->setMaxSpeed(2.0);
+      stepper[id]->setMaxSpeed(1.0);
+      stepper[id]->setAcceleration(MAX_ACCELERATION);
+      numSteppers++;
+      isRunning[id] = false;
+      return true;
     }
-    return true;
 
+    case ACCELSTEPPER_ZERO:
+    case ACCELSTEPPER_STOP:
+    case ACCELSTEPPER_REPORT_POSITION:
+      if (id >= MAX_ACCELSTEPPERS || argc != 2) {
+        Firmata.sendString(F("ACCELSTEPPER_DATA: invalid message"));
+        return false;
+      }
+      if (stepper[id]) {
+        if (stepCommand == ACCELSTEPPER_ZERO) {
+          stepper[id]->setCurrentPosition(0);
+        } else if (stepCommand == ACCELSTEPPER_STOP) {
+          stepper[id]->stop();
+          isRunning[id] = false;
+          reportPosition(id, true);
+        } else {
+          reportPosition(id, false);
+        }
+      }
+      return true;
+
+    case ACCELSTEPPER_STEP:
+    case ACCELSTEPPER_TO:
+      if (id >= MAX_ACCELSTEPPERS || argc != 7) {
+        Firmata.sendString(F("ACCELSTEPPER_DATA: invalid message"));
+        return false;
+      }
+      if (stepper[id]) {
+        const long position = decode32BitSignedInteger(argv[2], argv[3], argv[4], argv[5], argv[6]);
+        if (stepCommand == ACCELSTEPPER_STEP) {
+          stepper[id]->move(position);
+        } else {
+          stepper[id]->moveTo(position);
+        }
+        isRunning[id] = true;
+      }
+      return true;
+
+    case ACCELSTEPPER_ENABLE:
+      if (id >= MAX_ACCELSTEPPERS || argc != 3) {
+        Firmata.sendString(F("ACCELSTEPPER_ENABLE: invalid message"));
+        return false;
+      }
+      if (stepper[id]) {
+        if (argv[2] == 0x00) {
+          stepper[id]->disableOutputs();
+        } else {
+          stepper[id]->enableOutputs();
+        }
+      }
+      return true;
+
+    case ACCELSTEPPER_SET_ACCELERATION:
+    case ACCELSTEPPER_SET_SPEED:
+      if (id >= MAX_ACCELSTEPPERS || argc != 6) {
+        Firmata.sendString(F("ACCELSTEPPER_DATA: invalid message"));
+        return false;
+      }
+      if (stepper[id]) {
+        const float value = decodeCustomFloat(argv[2], argv[3], argv[4], argv[5]);
+        if (stepCommand == ACCELSTEPPER_SET_ACCELERATION) {
+          stepper[id]->setAcceleration(value == 0.0 ? MAX_ACCELERATION : value);
+        } else {
+          stepper[id]->setMaxSpeed(value);
+        }
+      }
+      return true;
+
+    case MULTISTEPPER_CONFIG: {
+      const byte groupId = id;
+      if (groupId >= MAX_GROUPS || argc < 3) {
+        Firmata.sendString(F("MULTISTEPPER_CONFIG: invalid message"));
+        return false;
+      }
+
+      const byte requested = argc - 2;
+      if ((unsigned int)groupStepperCount[groupId] + requested > MULTISTEPPER_MAX_STEPPERS) {
+        Firmata.sendString(F("MULTISTEPPER_CONFIG: too many steppers"));
+        return false;
+      }
+
+      for (byte i = 2; i < argc; i++) {
+        const byte stepperNumber = argv[i];
+        if (stepperNumber >= MAX_ACCELSTEPPERS || !stepper[stepperNumber]) {
+          Firmata.sendString(F("MULTISTEPPER_CONFIG: invalid stepper"));
+          return false;
+        }
+      }
+
+      if (!group[groupId]) {
+        group[groupId] = new MultiStepper();
+        if (!group[groupId]) {
+          Firmata.sendString(F("MULTISTEPPER_CONFIG: allocation failed"));
+          return false;
+        }
+        numGroups++;
+      }
+
+      for (byte i = 2; i < argc; i++) {
+        if (!group[groupId]->addStepper(*stepper[argv[i]])) {
+          Firmata.sendString(F("MULTISTEPPER_CONFIG: group is full"));
+          return false;
+        }
+        groupStepperCount[groupId]++;
+      }
+
+      groupIsRunning[groupId] = false;
+      return true;
+    }
+
+    case MULTISTEPPER_TO: {
+      const byte groupId = id;
+      if (groupId >= MAX_GROUPS || !group[groupId] || groupStepperCount[groupId] == 0) {
+        Firmata.sendString(F("MULTISTEPPER_TO: group not configured"));
+        return false;
+      }
+
+      const byte count = groupStepperCount[groupId];
+      const unsigned int expectedArgc = 2u + (unsigned int)count * 5u;
+      if (argc != expectedArgc) {
+        Firmata.sendString(F("MULTISTEPPER_TO: invalid target count"));
+        return false;
+      }
+
+      long positions[MULTISTEPPER_MAX_STEPPERS];
+      for (byte i = 0; i < count; i++) {
+        const unsigned int offset = 2u + (unsigned int)i * 5u;
+        positions[i] = decode32BitSignedInteger(argv[offset], argv[offset + 1], argv[offset + 2], argv[offset + 3], argv[offset + 4]);
+      }
+
+      group[groupId]->moveTo(positions);
+      groupIsRunning[groupId] = true;
+      return true;
+    }
+
+    case MULTISTEPPER_STOP: {
+      const byte groupId = id;
+      if (argc != 2 || groupId >= MAX_GROUPS || !group[groupId]) {
+        Firmata.sendString(F("MULTISTEPPER_STOP: invalid group"));
+        return false;
+      }
+      groupIsRunning[groupId] = false;
+      reportGroupComplete(groupId);
+      return true;
+    }
+
+    default:
+      return false;
   }
-  return false;
 }
 
 /*==============================================================================
@@ -309,24 +349,24 @@ boolean AccelStepperFirmata::handleSysex(byte command, byte argc, byte *argv)
 
 void AccelStepperFirmata::reset()
 {
-  for (byte i = 0; i < MAX_ACCELSTEPPERS; i++) {
-    isRunning[i] = false;
-    if (stepper[i]) {
-      free(stepper[i]);
-      stepper[i] = 0;
-    }
-  }
-  numSteppers = 0;
-
   for (byte i = 0; i < MAX_GROUPS; i++) {
     groupStepperCount[i] = 0;
     groupIsRunning[i] = false;
     if (group[i]) {
-      free(group[i]);
+      delete group[i];
       group[i] = 0;
     }
   }
   numGroups = 0;
+
+  for (byte i = 0; i < MAX_ACCELSTEPPERS; i++) {
+    isRunning[i] = false;
+    if (stepper[i]) {
+      delete stepper[i];
+      stepper[i] = 0;
+    }
+  }
+  numSteppers = 0;
 }
 
 /*==============================================================================
@@ -352,10 +392,13 @@ float AccelStepperFirmata::decodeCustomFloat(byte arg1, byte arg2, byte arg3, by
 
 long AccelStepperFirmata::decode32BitSignedInteger(byte arg1, byte arg2, byte arg3, byte arg4, byte arg5)
 {
-  long result = (long)arg1 | (long)arg2 << 7 | (long)arg3 << 14 | (long)arg4 << 21 | (((long)arg5 << 28) & 0x07);
+  const uint32_t magnitude = (uint32_t)arg1 | ((uint32_t)arg2 << 7) |
+      ((uint32_t)arg3 << 14) | ((uint32_t)arg4 << 21) |
+      (((uint32_t)arg5 & 0x07) << 28);
+  long result = (long)magnitude;
 
-  if ((long)arg5 >> 3 == 0x01) {
-    result = result * -1;
+  if (arg5 & 0x08) {
+    result = -result;
   }
 
   return result;
